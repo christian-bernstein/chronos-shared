@@ -1,2 +1,3 @@
-package de.christianbernstein.chronos 
+package de.christianbernstein.chronos
 
+open class Event(open val id: String)

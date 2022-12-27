@@ -1,3 +1,5 @@
+package de.christianbernstein.chronos
+
 /*
  * Copyright (c) 2022.
  *
@@ -10,126 +12,30 @@
  * the License.
  */
 
-import ActionMode.Companion.ifReaction
-import io.ktor.util.date.*
-import kotlinx.serialization.Serializable
+import de.christianbernstein.chronos.ActionMode.Companion.ifReaction
 import kotlinx.serialization.json.Json
+import org.quartz.*
+import org.quartz.impl.StdSchedulerFactory
 import java.io.File
 import java.time.DayOfWeek
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
+import java.time.temporal.TemporalUnit
 import java.util.*
+import java.util.Calendar
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import java.util.logging.Level
 import kotlin.collections.HashMap
+import kotlin.collections.Map
 import kotlin.io.path.readText
 import kotlin.math.max
-import kotlin.reflect.KClass
-
-/*
- * Copyright (c) 2022.
- *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
- * in compliance with the License. You may obtain a copy of the License at
- *  http://www.apache.org/licenses/LICENSE-2.0
- * Unless required by applicable law or agreed to in writing, software distributed under the License
- * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
- * or implied. See the License for the specific language governing permissions and limitations under
- * the License.
- */
-
-fun main() = with(TimerAPI(object : TimerAPIBridge {
-    override fun getAllActiveUsers(): List<String> = listOf("test")
-    override fun getWorkingDirectory(): File = File("C:\\dev\\timer_api\\").also { it.mkdirs() }
-})) {
-
-    createUser("test")
-
-    apiBus() + { it: SessionMarkedAsExpiredEvent ->
-        println("User ${it.user.id} :: Session marked as expired, Slots='${it.user.slotsInSeconds.joinToString()}'")
-    }
-
-    // reduceTimeSlots(
-    //     slots = arrayOf(1, 3, 5),
-    //     by = 0,
-    //     onBleed = { println("Bleeding: $it unit") }
-    // ).also { println(it.joinToString()) }
-
-    this.requestJoin(id = "test", { println("User can join"); executeSessionStart("test") }, { error("User cannot join") })
-
-    this.stopGlobalTimer(TimerAPI.console)
-
-    this.startGlobalTimer(Contractor("no_rights", bypass = false))
-
-    this.bridge.getWorkingDirectory()
-
-    return@with
-}
-
-@Serializable
-data class TimerAPIConfig(
-    var maxTimeSlotHistory: Int = 3,
-    var replenishMultipliers: Map<DayOfWeek, Double> = DayOfWeek.values().associateWith { 1e0 },
-    var replenishBase: Double = 1e0,
-    var replenishBaseUnit: TimeUnit = TimeUnit.HOURS,
-    var replenishWeekendMultiplier: Double = 1e0
-)
-
-@Serializable
-data class User(
-    val id: String,
-    var slotsInSeconds: List<Long> = emptyList(),
-    var operator: Boolean = false
-)
-
-@Serializable
-data class UserStorage(
-    val users: List<User>
-)
-
-data class UserSession(
-    val id: String,
-    val start: Instant
-)
-
-open class UserEvent(
-    val user: User,
-    eventID: String
-): Event(eventID)
-
-class SessionMarkedAsExpiredEvent(user: User): UserEvent(user = user, eventID = "SessionMarkedAsExpiredEvent")
-
-class SessionStoppedEvent(user: User): UserEvent(user = user, eventID = "SessionStoppedEvent")
-
-enum class ActionMode { ACTION, REACTION;
-    companion object {
-        fun ifReaction(mode: ActionMode, action: Runnable) = if (mode == REACTION) action.run() else {}
-    }
-}
-
-data class Contractor(
-    val id: String,
-    val log: (msg: Any, level: Level) -> Unit = { msg, _ -> println(msg) },
-    val bypass: Boolean,
-)
-
-data class UpdateResult<T>(
-    val data: T? = null,
-    val success: Boolean = true,
-    val code: Int = 0
-)
-
-interface TimerAPIBridge {
-    fun getAllActiveUsers(): List<String>
-    fun getWorkingDirectory(): File
-}
 
 @Suppress("RedundantVisibilityModifier", "MemberVisibilityCanBePrivate")
-class TimerAPI(val bridge: TimerAPIBridge) {
+class TimerAPI(var bridge: TimerAPIBridge) {
 
     companion object {
         public val console: Contractor = Contractor("console", bypass = true)
@@ -139,7 +45,11 @@ class TimerAPI(val bridge: TimerAPIBridge) {
 
     private val sessionFutures: HashMap<String, ScheduledFuture<*>> = HashMap()
 
+    private val sessionLeftoverTimeNotificationsExecutors: IDHashMap<ScheduledExecutorService> = HashMap()
+
     private var cachedConfig: TimerAPIConfig? = null
+
+    private var scheduler: Scheduler = StdSchedulerFactory().scheduler
 
     private val hermes: Hermes = with(Hermes(HermesConfig())) {
         registerBus("api")
@@ -154,40 +64,83 @@ class TimerAPI(val bridge: TimerAPIBridge) {
         this.loadConfigIntoCache()
     }
 
+    public fun start() {
+        // fixme right order?
+        this.scheduler.start()
+        this.startReplenishJob()
+        // TODO: Implement more start logic
+    }
+
+    public fun shutdown() {
+        this.scheduler.shutdown(false)
+        // TODO: Implement more shutdown logic
+    }
+
     private fun isWeekend(dayOfWeek: DayOfWeek): Boolean {
         return dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY
     }
 
-    private fun replenish() = with(this.loadConfig()) {
+    public fun getTimeLeft(id: String): Duration {
+        val session = this.sessions[id]
+        if (session != null) {
+            return Duration.between(Instant.now(), session.start.plusSeconds(session.estimatedTimeRemainingInSeconds))
+        }
+        return Duration.ofSeconds(requireNotNull(this.getUserFromID(id)).slotsInSeconds.sum())
+    }
+
+    private fun startLeftoverTimeNotifications(session: UserSession) = with(this.loadConfig(true)) {
+        val estimatedExpirationTime: Instant = session.start.plusSeconds(session.estimatedTimeRemainingInSeconds)
+        this@TimerAPI.sessionLeftoverTimeNotificationsExecutors[session.id] = Executors.newSingleThreadScheduledExecutor().also { executor ->
+            this.leftoverNotificationThresholds.forEach {
+                val secondsTilNotification = Duration.between(Instant.now(), estimatedExpirationTime.minus(it.measurand, it.unit.toChronoUnit())).seconds
+                if (secondsTilNotification < 0) return@forEach
+                executor.schedule({
+                    this@TimerAPI.apiBus() fire SessionLeftoverTimeThresholdReachedEvent(
+                        user = requireNotNull(this@TimerAPI.getUserFromID(session.id)),
+                        session = session,
+                        threshold = it
+                    )
+                }, secondsTilNotification, TimeUnit.SECONDS)
+            }
+        }
+    }
+
+    private fun stopLeftoverTimeNotifications(session: UserSession) = requireNotNull(this.sessionLeftoverTimeNotificationsExecutors.remove(session.id)).shutdownNow()
+
+    private fun startReplenishJob() {
+        this.scheduler.scheduleJob(
+            JobBuilder.newJob(ReplenishJob::class.java).build(),
+            TriggerBuilder.newTrigger().startNow().withSchedule(CronScheduleBuilder.dailyAtHourAndMinute(0, 0)).build()
+        )
+    }
+
+    fun replenish() = with(this.loadConfig()) {
         val maxHistoryLength = this.maxTimeSlotHistory
-        val replenishAmountInSeconds = this@TimerAPI.getReplenishAmount().seconds
-
+        val replenishAmountInSeconds = this@TimerAPI.getReplenishmentAmount().seconds
         this@TimerAPI.stopGlobalTimer(console)
-
         this@TimerAPI.updateUsers { users ->
             users.forEach { user ->
-                user.slotsInSeconds + replenishAmountInSeconds
+                user.slotsInSeconds += replenishAmountInSeconds
                 val size = user.slotsInSeconds.size
                 if (user.slotsInSeconds.size > maxHistoryLength) {
-                    user.slotsInSeconds.toMutableList().subList(0, size - maxHistoryLength).clear()
+                    val temp = user.slotsInSeconds.toMutableList()
+                    temp.subList(0, size - maxHistoryLength).clear()
+                    user.slotsInSeconds = temp
                 }
             }
             users
         }
-
         this@TimerAPI.startGlobalTimer(console)
     }
 
-    fun getReplenishAmount(dayOfWeek: DayOfWeek = LocalDate.now().dayOfWeek): Duration {
-        with(this.loadConfig(true)) {
-            // Base time per day in
-            var baseInSec: Double = this.replenishBaseUnit.toSeconds(this.replenishBase.toLong()).toDouble()
-            // Multiplier per day
-            baseInSec *= requireNotNull(this.replenishMultipliers[dayOfWeek])
-            // Special multiplier for weekends
-            if (this@TimerAPI.isWeekend(dayOfWeek)) baseInSec *= requireNotNull(this.replenishWeekendMultiplier)
-            return Duration.of(baseInSec.toLong(), ChronoUnit.SECONDS)
-        }
+    fun getReplenishmentAmount(dayOfWeek: DayOfWeek = LocalDate.now().dayOfWeek): Duration = with(this.loadConfig(true)) {
+        // Base time per day in
+        var baseInSec: Double = this.replenishBaseUnit.toSeconds(this.replenishBase.toLong()).toDouble()
+        // Multiplier per day
+        baseInSec *= requireNotNull(this.replenishMultipliers[dayOfWeek])
+        // Special multiplier for weekends
+        if (this@TimerAPI.isWeekend(dayOfWeek)) baseInSec *= requireNotNull(this.replenishWeekendMultiplier)
+        return Duration.of(baseInSec.toLong(), ChronoUnit.SECONDS)
     }
 
     fun getDefaultConfig(): TimerAPIConfig = TimerAPIConfig()
@@ -198,7 +151,7 @@ class TimerAPI(val bridge: TimerAPIBridge) {
 
     fun getUserStorageFile(): File = this.getFile("users.json")
 
-    private fun createUserForID(id: String): User = User(id, slotsInSeconds = listOf(this.getReplenishAmount().toSeconds()))
+    private fun createUserForID(id: String): User = User(id, slotsInSeconds = listOf(this.getReplenishmentAmount().toSeconds()))
 
     fun createUser(id: String) {
         // Check if a user with the given id already exists
@@ -208,6 +161,8 @@ class TimerAPI(val bridge: TimerAPIBridge) {
             it + this.createUserForID(id)
         }
     }
+
+    fun hasUserBeenRegistered(id: String) = this.getUserFromID(id) != null
 
     fun updateUsers(updater: (users: List<User>) -> List<User>) = this.overwriteUsers(updater(this.loadUsers()))
 
@@ -257,17 +212,9 @@ class TimerAPI(val bridge: TimerAPIBridge) {
         }
 
         if (this.exists().not()) {
-
-            println("Create new config")
-
             return@with this@TimerAPI.overwriteConfig()
         }
-
         try {
-
-
-            println("Try to load config from file")
-
             this@TimerAPI.json.decodeFromString(TimerAPIConfig.serializer(), this.toPath().readText(Charsets.UTF_8))
         } catch (e: Exception) {
             e.printStackTrace()
@@ -294,8 +241,6 @@ class TimerAPI(val bridge: TimerAPIBridge) {
     }
 
     fun stopGlobalTimer(contractor: Contractor) = this.update(contractor, arrayOf("stop_global_timer")) {
-        println("stopGlobalTimer")
-
         this.sessions.forEach { session ->
             val id = session.key
             this.executeSessionStop(id, ActionMode.ACTION)
@@ -303,8 +248,6 @@ class TimerAPI(val bridge: TimerAPIBridge) {
     }
 
     fun startGlobalTimer(contractor: Contractor) = this.update(contractor, arrayOf("start_global_timer")) {
-        println("startGlobalTimer")
-
         this.bridge.getAllActiveUsers().forEach { user ->
             this.executeSessionStart(user)
         }
@@ -332,16 +275,23 @@ class TimerAPI(val bridge: TimerAPIBridge) {
 
     @Suppress("MemberVisibilityCanBePrivate")
     public fun executeSessionStart(id: String) = with(requireNotNull(getUserFromID(id))) {
-        println("executeSessionStart for '$id'")
+        // TODO: Check if session already present
 
-        this@TimerAPI.sessions[id] = UserSession(
-            id = id,
-            start = Instant.now()
-        )
+        // TODO: Check if still timeslots available
         val timeLeft: Long = this@TimerAPI.calculateTimeLeft(this)
+        val session = UserSession(
+            id = id,
+            start = Instant.now(),
+            estimatedTimeRemainingInSeconds = timeLeft
+        )
+        this@TimerAPI.sessions[id] = session
         this@TimerAPI.sessionFutures[id] = Executors.newSingleThreadScheduledExecutor().schedule({
             this@TimerAPI.executeSessionStop(id, ActionMode.REACTION)
         }, timeLeft, TimeUnit.SECONDS)
+
+        this@TimerAPI.startLeftoverTimeNotifications(session)
+
+        this@TimerAPI.apiBus() fire SessionCreatedEvent(this@TimerAPI.getUserFromID(id)!!, session, availableSessionTimeInSec = timeLeft)
     }
 
     private fun stopTimerFor(id: String) = with(requireNotNull(sessionFutures.remove(id))) {
@@ -349,8 +299,6 @@ class TimerAPI(val bridge: TimerAPIBridge) {
     }
 
     public fun executeSessionStop(id: String, actionMode: ActionMode = ActionMode.ACTION) = with(requireNotNull(this.sessions.remove(id))) {
-        println("executeSessionStop for '$id'")
-
         this@TimerAPI.stopTimerFor(id)
         updateUser(id) {
             it.slotsInSeconds = this@TimerAPI.reduceTimeSlots(
@@ -359,9 +307,11 @@ class TimerAPI(val bridge: TimerAPIBridge) {
             ).toList()
             it
         }
-    }.also {
+
+        this@TimerAPI.stopLeftoverTimeNotifications(this)
+
         ifReaction(actionMode) {
-            this@TimerAPI.apiBus() fire SessionMarkedAsExpiredEvent(this@TimerAPI.getUserFromID(id)!!)
+            this@TimerAPI.apiBus() fire SessionMarkedAsExpiredEvent(this@TimerAPI.getUserFromID(id)!!, this)
         }
     }
 
@@ -372,8 +322,11 @@ class TimerAPI(val bridge: TimerAPIBridge) {
     @Suppress("MemberVisibilityCanBePrivate")
     public fun apiBus(): EventBus = requireNotNull(this.hermes.bus("api"))
 
-    private fun updateUser(id: String, updater: (user: User) -> User) {
-        this.updateUsers {  users ->
+    public fun updateUser(id: String, updater: (user: User) -> User) {
+        // If the requested user doesn't exist yet, create a user profile
+        if (this.hasUserBeenRegistered(id).not()) createUser(id)
+        // Update the stored user
+        this.updateUsers { users ->
             var user = requireNotNull(users.find { it.id == id })
             user = updater(user)
             users.filter { it.id != id } + user
@@ -400,69 +353,3 @@ class TimerAPI(val bridge: TimerAPIBridge) {
     }
 }
 
-open class Event(open val id: String)
-
-class EventBus {
-
-    val listeners: MutableMap<KClass<*>, MutableList<IEventListener<out Event>>> = mutableMapOf()
-
-    inline infix fun <reified T : Event> register(listener: IEventListener<T>) {
-        val eventClass = T::class
-        val eventListeners: MutableList<IEventListener<out Event>> = listeners.getOrPut(eventClass) { mutableListOf() }
-        eventListeners.add(listener)
-    }
-
-    inline infix fun <reified T: Event> fire(event: T) = listeners[event::class]
-        ?.asSequence()
-        ?.filterIsInstance<IEventListener<T>>()
-        ?.forEach { it.handle(event) }
-
-    fun fireUnknown(event: Event) = listeners[event::class]
-        ?.asSequence()
-        ?.filterIsInstance<IEventListener<Event>>()
-        ?.forEach { it.handle(event) }
-
-    inline operator fun <reified T : Event> plus(listener: IEventListener<T>) = this.register(listener)
-
-    inline operator fun <reified T : Event> plus(crossinline listener: (event: T) -> Unit) = this.register(object :
-        IEventListener<T> {
-        override fun handle(event: T) = listener(event)
-    })
-
-    @JvmName("unknown_add")
-    inline operator fun plus(crossinline listener: (event: Event) -> Unit) = this.register(object :
-        IEventListener<Event> {
-        override fun handle(event: Event) = listener(event)
-    })
-}
-
-@Suppress("MemberVisibilityCanBePrivate")
-class Hermes(val config: HermesConfig = HermesConfig()) {
-
-    private val busses: MutableMap<String, EventBus> = mutableMapOf()
-
-    fun registerBus(busID: String, bus: EventBus = this.config.defaultBusFactory(busID, this)): Hermes {
-        this.busses[busID] = bus
-        return this
-    }
-
-    fun hasBus(busID: String): Boolean {
-        return this.busses.contains(busID)
-    }
-
-    fun bus(busID: String, busAction: ((bus: EventBus) -> Unit)? = null): EventBus? {
-        this.busses[busID].also {
-            it ?: return@bus null
-            busAction?.invoke(it)
-            return@bus it
-        }
-    }
-}
-
-data class HermesConfig(
-    val defaultBusFactory: (busID: String, hermes: Hermes) -> EventBus = { _, _ -> EventBus() }
-)
-
-interface IEventListener<T: Event> {
-    fun handle(event: T)
-}

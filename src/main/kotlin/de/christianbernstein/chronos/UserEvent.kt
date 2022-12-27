@@ -1,2 +1,6 @@
-package de.christianbernstein.chronos 
+package de.christianbernstein.chronos
 
+open class UserEvent(
+    val user: User,
+    eventID: String
+): Event(eventID)
