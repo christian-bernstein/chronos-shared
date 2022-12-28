@@ -18,7 +18,7 @@ dependencies {
     testImplementation(kotlin("test"))
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.4.1")
     // https://mvnrepository.com/artifact/org.quartz-scheduler/quartz
-    implementation("org.quartz-scheduler:quartz:2.3.0")
+    implementation("org.quartz-scheduler:quartz:2.3.2")
 
     // https://mvnrepository.com/artifact/org.slf4j/slf4j-simple
     testImplementation("org.slf4j:slf4j-simple:2.0.6")
