@@ -22,15 +22,12 @@ import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
-import java.time.temporal.TemporalUnit
 import java.util.*
-import java.util.Calendar
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import kotlin.collections.HashMap
-import kotlin.collections.Map
 import kotlin.io.path.readText
 import kotlin.math.max
 
@@ -65,7 +62,6 @@ class TimerAPI(var bridge: TimerAPIBridge) {
     }
 
     public fun start() {
-        // fixme right order?
         this.scheduler.start()
         this.startReplenishJob()
         // TODO: Implement more start logic
