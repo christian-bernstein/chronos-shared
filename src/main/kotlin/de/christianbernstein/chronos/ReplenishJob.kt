@@ -6,10 +6,6 @@ import org.quartz.JobExecutionContext
 class ReplenishJob: Job {
 
     override fun execute(context: JobExecutionContext?) {
-        println("ReplenishJob..")
-
-        TODO("Implement")
-
-        // this@TimerAPI.replenish()
+        ChronosAPI.instance.replenish()
     }
 }

@@ -36,6 +36,8 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
 
     companion object {
         public val console: Contractor = Contractor("console", bypass = true)
+
+        public lateinit var instance: ChronosAPI
     }
 
     private var sessions: HashMap<String, UserSession> = HashMap()
@@ -50,7 +52,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         // Configure the scheduler factory
         Properties().also { properties ->
             // The thread count has to be set manually in code or a config file
-            properties.setProperty("org.quartz.threadPool.threadCount", 10.toString())
+            properties.setProperty("org.quartz.threadPool.threadCount", 1.toString())
         }
     ) }.scheduler
 
@@ -64,6 +66,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
     }
 
     init {
+        instance = this
         this.loadConfigIntoCache()
     }
 
@@ -119,6 +122,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         )
     }
 
+    // TODO: Fire an event -> SessionTimeReplenishEvent
     fun replenish() = with(this.loadConfig()) {
         val maxHistoryLength = this.maxTimeSlotHistory
         val replenishAmountInSeconds = this@ChronosAPI.getReplenishmentAmount().seconds
