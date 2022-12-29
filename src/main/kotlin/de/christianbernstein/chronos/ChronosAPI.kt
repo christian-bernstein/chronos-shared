@@ -47,7 +47,9 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
     private var cachedConfig: ChronosAPIConfig? = null
 
     private var scheduler: Scheduler = StdSchedulerFactory().also { it.initialize(
+        // Configure the scheduler factory
         Properties().also { properties ->
+            // The thread count has to be set manually in code or a config file
             properties.setProperty("org.quartz.threadPool.threadCount", 10.toString())
         }
     ) }.scheduler
@@ -95,11 +97,14 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
                 val secondsTilNotification = Duration.between(Instant.now(), estimatedExpirationTime.minus(it.measurand, it.unit.toChronoUnit())).seconds
                 if (secondsTilNotification < 0) return@forEach
                 executor.schedule({
-                    this@ChronosAPI.apiBus() fire SessionLeftoverTimeThresholdReachedEvent(
+                    SessionLeftoverTimeThresholdReachedEvent(
                         user = requireNotNull(this@ChronosAPI.getUserFromID(session.id)),
                         session = session,
                         threshold = it
-                    )
+                    ).also { event ->
+                        this@ChronosAPI.apiBus() fire event
+                        this@ChronosAPI.bridge.onSessionTimeThresholdReached(event)
+                    }
                 }, secondsTilNotification, TimeUnit.SECONDS)
             }
         }
@@ -187,6 +192,9 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
     }
 
     fun overwriteConfig(config: ChronosAPIConfig = this.getDefaultConfig()): ChronosAPIConfig = with(this.getConfigFile()) {
+        println("Overwriting config file '${this.path}'")
+
+        this.parentFile.mkdirs()
         this.createNewFile()
         this.writeText(this@ChronosAPI.json.encodeToString(ChronosAPIConfig.serializer(), config), Charsets.UTF_8)
         config
@@ -260,7 +268,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         }
         if (checkIfUserCanJoin(this)) {
             onJoinPermitted.run()
-        } else{
+        } else {
             onJoinRefused.run()
         }
     }
@@ -291,6 +299,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
 
         this@ChronosAPI.startLeftoverTimeNotifications(session)
 
+        // TODO: Move to bridge
         this@ChronosAPI.apiBus() fire SessionCreatedEvent(this@ChronosAPI.getUserFromID(id)!!, session, availableSessionTimeInSec = timeLeft)
     }
 
@@ -298,20 +307,26 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         this.cancel(false)
     }
 
-    public fun executeSessionStop(id: String, actionMode: ActionMode = ActionMode.ACTION) = with(requireNotNull(this.sessions.remove(id))) {
-        this@ChronosAPI.stopTimerFor(id)
-        updateUser(id) {
-            it.slotsInSeconds = this@ChronosAPI.reduceTimeSlots(
-                it.slotsInSeconds.toTypedArray(),
-                Duration.between(this.start, Instant.now()).seconds
-            ).toList()
-            it
-        }
+    public fun executeSessionStop(id: String, actionMode: ActionMode = ActionMode.ACTION) {
+        val session = this.sessions.remove(id) ?: return
+        with(session) {
+            this@ChronosAPI.stopTimerFor(id)
+            updateUser(id) {
+                it.slotsInSeconds = this@ChronosAPI.reduceTimeSlots(
+                    it.slotsInSeconds.toTypedArray(),
+                    Duration.between(this.start, Instant.now()).seconds
+                ).toList()
+                it
+            }
 
-        this@ChronosAPI.stopLeftoverTimeNotifications(this)
+            this@ChronosAPI.stopLeftoverTimeNotifications(this)
 
-        ifReaction(actionMode) {
-            this@ChronosAPI.apiBus() fire SessionMarkedAsExpiredEvent(this@ChronosAPI.getUserFromID(id)!!, this)
+            ifReaction(actionMode) {
+                SessionMarkedAsExpiredEvent(this@ChronosAPI.getUserFromID(id)!!, this).also { event ->
+                    this@ChronosAPI.apiBus() fire event
+                    this@ChronosAPI.bridge.onSessionMarkedAsExpired(event)
+                }
+            }
         }
     }
 

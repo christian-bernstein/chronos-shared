@@ -2,6 +2,7 @@ package suite
 
 import de.christianbernstein.chronos.ChronosAPI
 import de.christianbernstein.chronos.ChronosAPIBridge
+import de.christianbernstein.chronos.SessionCreatedEvent
 import java.io.File
 
 val baseBridge: ChronosAPIBridge = object : ChronosAPIBridge {
