@@ -32,7 +32,7 @@ import kotlin.io.path.readText
 import kotlin.math.max
 
 @Suppress("RedundantVisibilityModifier", "MemberVisibilityCanBePrivate")
-class TimerAPI(var bridge: TimerAPIBridge) {
+class ChronosAPI(var bridge: ChronosAPIBridge) {
 
     companion object {
         public val console: Contractor = Contractor("console", bypass = true)
@@ -44,9 +44,13 @@ class TimerAPI(var bridge: TimerAPIBridge) {
 
     private val sessionLeftoverTimeNotificationsExecutors: IDHashMap<ScheduledExecutorService> = HashMap()
 
-    private var cachedConfig: TimerAPIConfig? = null
+    private var cachedConfig: ChronosAPIConfig? = null
 
-    private var scheduler: Scheduler = StdSchedulerFactory().scheduler
+    private var scheduler: Scheduler = StdSchedulerFactory().also { it.initialize(
+        Properties().also { properties ->
+            properties.setProperty("org.quartz.threadPool.threadCount", 10.toString())
+        }
+    ) }.scheduler
 
     private val hermes: Hermes = with(Hermes(HermesConfig())) {
         registerBus("api")
@@ -86,13 +90,13 @@ class TimerAPI(var bridge: TimerAPIBridge) {
 
     private fun startLeftoverTimeNotifications(session: UserSession) = with(this.loadConfig(true)) {
         val estimatedExpirationTime: Instant = session.start.plusSeconds(session.estimatedTimeRemainingInSeconds)
-        this@TimerAPI.sessionLeftoverTimeNotificationsExecutors[session.id] = Executors.newSingleThreadScheduledExecutor().also { executor ->
+        this@ChronosAPI.sessionLeftoverTimeNotificationsExecutors[session.id] = Executors.newSingleThreadScheduledExecutor().also { executor ->
             this.leftoverNotificationThresholds.forEach {
                 val secondsTilNotification = Duration.between(Instant.now(), estimatedExpirationTime.minus(it.measurand, it.unit.toChronoUnit())).seconds
                 if (secondsTilNotification < 0) return@forEach
                 executor.schedule({
-                    this@TimerAPI.apiBus() fire SessionLeftoverTimeThresholdReachedEvent(
-                        user = requireNotNull(this@TimerAPI.getUserFromID(session.id)),
+                    this@ChronosAPI.apiBus() fire SessionLeftoverTimeThresholdReachedEvent(
+                        user = requireNotNull(this@ChronosAPI.getUserFromID(session.id)),
                         session = session,
                         threshold = it
                     )
@@ -112,9 +116,9 @@ class TimerAPI(var bridge: TimerAPIBridge) {
 
     fun replenish() = with(this.loadConfig()) {
         val maxHistoryLength = this.maxTimeSlotHistory
-        val replenishAmountInSeconds = this@TimerAPI.getReplenishmentAmount().seconds
-        this@TimerAPI.stopGlobalTimer(console)
-        this@TimerAPI.updateUsers { users ->
+        val replenishAmountInSeconds = this@ChronosAPI.getReplenishmentAmount().seconds
+        this@ChronosAPI.stopGlobalTimer(console)
+        this@ChronosAPI.updateUsers { users ->
             users.forEach { user ->
                 user.slotsInSeconds += replenishAmountInSeconds
                 val size = user.slotsInSeconds.size
@@ -126,7 +130,7 @@ class TimerAPI(var bridge: TimerAPIBridge) {
             }
             users
         }
-        this@TimerAPI.startGlobalTimer(console)
+        this@ChronosAPI.startGlobalTimer(console)
     }
 
     fun getReplenishmentAmount(dayOfWeek: DayOfWeek = LocalDate.now().dayOfWeek): Duration = with(this.loadConfig(true)) {
@@ -135,11 +139,11 @@ class TimerAPI(var bridge: TimerAPIBridge) {
         // Multiplier per day
         baseInSec *= requireNotNull(this.replenishMultipliers[dayOfWeek])
         // Special multiplier for weekends
-        if (this@TimerAPI.isWeekend(dayOfWeek)) baseInSec *= requireNotNull(this.replenishWeekendMultiplier)
+        if (this@ChronosAPI.isWeekend(dayOfWeek)) baseInSec *= requireNotNull(this.replenishWeekendMultiplier)
         return Duration.of(baseInSec.toLong(), ChronoUnit.SECONDS)
     }
 
-    fun getDefaultConfig(): TimerAPIConfig = TimerAPIConfig()
+    fun getDefaultConfig(): ChronosAPIConfig = ChronosAPIConfig()
 
     fun getFile(localPath: String): File = File("${this.bridge.getWorkingDirectory().path}\\$localPath")
 
@@ -164,27 +168,27 @@ class TimerAPI(var bridge: TimerAPIBridge) {
 
     fun loadUsers(): List<User> = with(this.getUserStorageFile()) {
         if (this.exists().not()) {
-            return@with this@TimerAPI.overwriteUsers()
+            return@with this@ChronosAPI.overwriteUsers()
         }
         try {
-            this@TimerAPI.json.decodeFromString(UserStorage.serializer(), this.toPath().readText(Charsets.UTF_8)).users
+            this@ChronosAPI.json.decodeFromString(UserStorage.serializer(), this.toPath().readText(Charsets.UTF_8)).users
         } catch (e: Exception) {
             e.printStackTrace()
-            this@TimerAPI.overwriteUsers()
+            this@ChronosAPI.overwriteUsers()
         }
     }
 
     fun overwriteUsers(users: List<User> = emptyList()): List<User> = with(this.getUserStorageFile()) {
         this.createNewFile()
-        this.writeText(this@TimerAPI.json.encodeToString(UserStorage.serializer(), UserStorage(
+        this.writeText(this@ChronosAPI.json.encodeToString(UserStorage.serializer(), UserStorage(
             users = users
         )), Charsets.UTF_8)
         users
     }
 
-    fun overwriteConfig(config: TimerAPIConfig = this.getDefaultConfig()): TimerAPIConfig = with(this.getConfigFile()) {
+    fun overwriteConfig(config: ChronosAPIConfig = this.getDefaultConfig()): ChronosAPIConfig = with(this.getConfigFile()) {
         this.createNewFile()
-        this.writeText(this@TimerAPI.json.encodeToString(TimerAPIConfig.serializer(), config), Charsets.UTF_8)
+        this.writeText(this@ChronosAPI.json.encodeToString(ChronosAPIConfig.serializer(), config), Charsets.UTF_8)
         config
     }
 
@@ -192,10 +196,10 @@ class TimerAPI(var bridge: TimerAPIBridge) {
         this.cachedConfig = it
     }
 
-    fun updateConfig(updater: (config: TimerAPIConfig) -> TimerAPIConfig) = overwriteConfig(updater(loadConfig()))
+    fun updateConfig(updater: (config: ChronosAPIConfig) -> ChronosAPIConfig) = overwriteConfig(updater(loadConfig()))
 
-    fun loadConfig(useCachedVersionIfPossible: Boolean = true): TimerAPIConfig = with(this.getConfigFile()) {
-        with(this@TimerAPI.cachedConfig) cache@ {
+    fun loadConfig(useCachedVersionIfPossible: Boolean = true): ChronosAPIConfig = with(this.getConfigFile()) {
+        with(this@ChronosAPI.cachedConfig) cache@ {
             if (useCachedVersionIfPossible && (this != null)) {
                 return@cache this
             } else {
@@ -208,13 +212,13 @@ class TimerAPI(var bridge: TimerAPIBridge) {
         }
 
         if (this.exists().not()) {
-            return@with this@TimerAPI.overwriteConfig()
+            return@with this@ChronosAPI.overwriteConfig()
         }
         try {
-            this@TimerAPI.json.decodeFromString(TimerAPIConfig.serializer(), this.toPath().readText(Charsets.UTF_8))
+            this@ChronosAPI.json.decodeFromString(ChronosAPIConfig.serializer(), this.toPath().readText(Charsets.UTF_8))
         } catch (e: Exception) {
             e.printStackTrace()
-            this@TimerAPI.overwriteConfig()
+            this@ChronosAPI.overwriteConfig()
         }
     }
 
@@ -274,20 +278,20 @@ class TimerAPI(var bridge: TimerAPIBridge) {
         // TODO: Check if session already present
 
         // TODO: Check if still timeslots available
-        val timeLeft: Long = this@TimerAPI.calculateTimeLeft(this)
+        val timeLeft: Long = this@ChronosAPI.calculateTimeLeft(this)
         val session = UserSession(
             id = id,
             start = Instant.now(),
             estimatedTimeRemainingInSeconds = timeLeft
         )
-        this@TimerAPI.sessions[id] = session
-        this@TimerAPI.sessionFutures[id] = Executors.newSingleThreadScheduledExecutor().schedule({
-            this@TimerAPI.executeSessionStop(id, ActionMode.REACTION)
+        this@ChronosAPI.sessions[id] = session
+        this@ChronosAPI.sessionFutures[id] = Executors.newSingleThreadScheduledExecutor().schedule({
+            this@ChronosAPI.executeSessionStop(id, ActionMode.REACTION)
         }, timeLeft, TimeUnit.SECONDS)
 
-        this@TimerAPI.startLeftoverTimeNotifications(session)
+        this@ChronosAPI.startLeftoverTimeNotifications(session)
 
-        this@TimerAPI.apiBus() fire SessionCreatedEvent(this@TimerAPI.getUserFromID(id)!!, session, availableSessionTimeInSec = timeLeft)
+        this@ChronosAPI.apiBus() fire SessionCreatedEvent(this@ChronosAPI.getUserFromID(id)!!, session, availableSessionTimeInSec = timeLeft)
     }
 
     private fun stopTimerFor(id: String) = with(requireNotNull(sessionFutures.remove(id))) {
@@ -295,19 +299,19 @@ class TimerAPI(var bridge: TimerAPIBridge) {
     }
 
     public fun executeSessionStop(id: String, actionMode: ActionMode = ActionMode.ACTION) = with(requireNotNull(this.sessions.remove(id))) {
-        this@TimerAPI.stopTimerFor(id)
+        this@ChronosAPI.stopTimerFor(id)
         updateUser(id) {
-            it.slotsInSeconds = this@TimerAPI.reduceTimeSlots(
+            it.slotsInSeconds = this@ChronosAPI.reduceTimeSlots(
                 it.slotsInSeconds.toTypedArray(),
                 Duration.between(this.start, Instant.now()).seconds
             ).toList()
             it
         }
 
-        this@TimerAPI.stopLeftoverTimeNotifications(this)
+        this@ChronosAPI.stopLeftoverTimeNotifications(this)
 
         ifReaction(actionMode) {
-            this@TimerAPI.apiBus() fire SessionMarkedAsExpiredEvent(this@TimerAPI.getUserFromID(id)!!, this)
+            this@ChronosAPI.apiBus() fire SessionMarkedAsExpiredEvent(this@ChronosAPI.getUserFromID(id)!!, this)
         }
     }
 

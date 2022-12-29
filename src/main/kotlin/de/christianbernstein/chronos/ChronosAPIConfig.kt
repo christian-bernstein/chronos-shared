@@ -5,7 +5,7 @@ import java.time.DayOfWeek
 import java.util.concurrent.TimeUnit
 
 @Serializable
-data class TimerAPIConfig(
+data class ChronosAPIConfig(
     var maxTimeSlotHistory: Int = 3,
     var replenishMultipliers: Map<DayOfWeek, Double> = DayOfWeek.values().associateWith { 1e0 },
     var replenishBase: Double = 1e0,

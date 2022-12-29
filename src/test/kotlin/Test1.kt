@@ -1,13 +1,13 @@
 import de.christianbernstein.chronos.Contractor
 import de.christianbernstein.chronos.SessionMarkedAsExpiredEvent
-import de.christianbernstein.chronos.TimerAPI
-import de.christianbernstein.chronos.TimerAPIBridge
+import de.christianbernstein.chronos.ChronosAPI
+import de.christianbernstein.chronos.ChronosAPIBridge
 import java.io.File
 
 
 
 fun main() {
-    fun main() = with(TimerAPI(object : TimerAPIBridge {
+    fun main() = with(ChronosAPI(object : ChronosAPIBridge {
         override fun getAllActiveUsers(): List<String> = listOf("test")
         override fun getWorkingDirectory(): File = File("C:\\dev\\timer_api\\").also { it.mkdirs() }
     })) {
@@ -26,7 +26,7 @@ fun main() {
 
         this.requestJoin(id = "test", { println("User can join"); executeSessionStart("test") }, { error("User cannot join") })
 
-        this.stopGlobalTimer(TimerAPI.console)
+        this.stopGlobalTimer(ChronosAPI.console)
 
         this.startGlobalTimer(Contractor("no_rights", bypass = false))
 

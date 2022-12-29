@@ -4,6 +4,7 @@ plugins {
     kotlin("jvm") version "1.7.20"
     kotlin("plugin.serialization") version "1.7.20"
     id("com.github.johnrengelman.shadow") version "7.1.2"
+    id("java")
     application
 }
 
@@ -22,8 +23,6 @@ dependencies {
 
     // https://mvnrepository.com/artifact/org.slf4j/slf4j-simple
     testImplementation("org.slf4j:slf4j-simple:2.0.6")
-
-
 }
 
 tasks.test {

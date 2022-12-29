@@ -2,7 +2,7 @@ package de.christianbernstein.chronos
 
 import java.io.File
 
-interface TimerAPIBridge {
+interface ChronosAPIBridge {
     fun getAllActiveUsers(): List<String>
     fun getWorkingDirectory(): File
 }
