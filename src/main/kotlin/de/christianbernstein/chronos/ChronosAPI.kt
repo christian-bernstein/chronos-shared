@@ -46,6 +46,8 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
 
     private val sessionLeftoverTimeNotificationsExecutors: IDHashMap<ScheduledExecutorService> = HashMap()
 
+    private val exclusionTable: IDHashMap<Boolean> = HashMap()
+
     private var cachedConfig: ChronosAPIConfig? = null
 
     private var scheduler: Scheduler = StdSchedulerFactory().also { it.initialize(
@@ -64,6 +66,8 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         encodeDefaults = true
         prettyPrint = true
     }
+
+    private var isGlobalTimerActive: Boolean = true
 
     init {
         instance = this
@@ -160,7 +164,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
 
     fun getUserStorageFile(): File = this.getFile("users.json")
 
-    private fun createUserForID(id: String): User = User(id, slotsInSeconds = listOf(this.getReplenishmentAmount().toSeconds()))
+    private fun createUserForID(id: String): User = User(id, slotsInSeconds = listOf(this.getReplenishmentAmount().toSeconds()), operator = false)
 
     fun createUser(id: String) {
         // Check if a user with the given id already exists
@@ -198,8 +202,14 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
     fun overwriteConfig(config: ChronosAPIConfig = this.getDefaultConfig()): ChronosAPIConfig = with(this.getConfigFile()) {
         println("Overwriting config file '${this.path}'")
 
-        this.parentFile.mkdirs()
+        // If at root directory, parent file (folder) will be null
+        with(this.parentFile) parent@ {
+            if (this == null) return@parent
+            this.mkdirs();
+        }
+
         this.createNewFile()
+
         this.writeText(this@ChronosAPI.json.encodeToString(ChronosAPIConfig.serializer(), config), Charsets.UTF_8)
         config
     }
@@ -234,9 +244,10 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         }
     }
 
+    public fun getSlotsOf(id: String): List<Long> = this.getUserFromID(id)?.slotsInSeconds ?: listOf()
+
     fun arePermissionsGranted(contractor: Contractor, vararg permissions: String): Boolean {
         if (contractor.bypass) return true
-
         // TODO: Implement
         return false
     }
@@ -253,6 +264,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
     }
 
     fun stopGlobalTimer(contractor: Contractor) = this.update(contractor, arrayOf("stop_global_timer")) {
+        this.isGlobalTimerActive = false
         this.sessions.forEach { session ->
             val id = session.key
             this.executeSessionStop(id, ActionMode.ACTION)
@@ -260,6 +272,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
     }
 
     fun startGlobalTimer(contractor: Contractor) = this.update(contractor, arrayOf("start_global_timer")) {
+        this.isGlobalTimerActive = true
         this.bridge.getAllActiveUsers().forEach { user ->
             this.executeSessionStart(user)
         }
@@ -277,17 +290,30 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         }
     }
 
+    public fun setExclusionFlag(id: String, flag: Boolean) {
+        this.exclusionTable[id] = flag
+    }
+
     public fun resumeTimerFor(id: String) {
+        this.setExclusionFlag(id, false)
         this.executeSessionStart(id)
     }
 
     public fun pauseTimerFor(id: String) {
+        this.setExclusionFlag(id, true)
         this.executeSessionStop(id, ActionMode.ACTION)
     }
 
+    public fun isExcluded(id: String): Boolean = this.exclusionTable.getOrDefault(id, false)
+
     @Suppress("MemberVisibilityCanBePrivate")
-    public fun executeSessionStart(id: String) = with(requireNotNull(getUserFromID(id))) {
+    public fun executeSessionStart(id: String, overwriteExclusionFlag: Boolean = false) = with(requireNotNull(getUserFromID(id))) {
         // TODO: Check if session already present
+
+        // Check if user marked as excluded :: Excluded users cannot start a session unless the overwrite flag is set
+        if (this@ChronosAPI.isExcluded(id) && overwriteExclusionFlag.not()) {
+            return@with
+        }
 
         // TODO: Check if still timeslots available
         val timeLeft: Long = this@ChronosAPI.calculateTimeLeft(this)
@@ -334,7 +360,14 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         }
     }
 
-    private fun checkIfUserCanJoin(user: User): Boolean = calculateTimeLeft(user) > 0
+    private fun checkIfUserCanJoin(user: User): Boolean {
+        // IF global timer not active, any user can join
+        if (this.isGlobalTimerActive.not()) return true
+        // Any operator can join at any time, even having no time left :: TODO: Not time == no session starting
+        if (user.operator) return true
+        // Default timer check
+        return calculateTimeLeft(user) > 0
+    }
 
     private fun calculateTimeLeft(user: User): Long = user.slotsInSeconds.sum()
 
