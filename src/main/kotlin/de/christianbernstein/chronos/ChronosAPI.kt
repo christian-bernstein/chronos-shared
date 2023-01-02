@@ -82,6 +82,13 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
 
     public fun shutdown() {
         this.scheduler.shutdown(false)
+
+        this.sessionLeftoverTimeNotificationsExecutors.forEach { (_, u) -> u.shutdownNow() }
+        this.sessionLeftoverTimeNotificationsExecutors.clear()
+
+        this.sessionFutures.forEach { (_, u) -> u.cancel(false)}
+        this.sessionFutures.clear()
+
         // TODO: Implement more shutdown logic
     }
 
@@ -99,10 +106,12 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
 
     private fun startLeftoverTimeNotifications(session: UserSession) = with(this.loadConfig(true)) {
         val estimatedExpirationTime: Instant = session.start.plusSeconds(session.estimatedTimeRemainingInSeconds)
+
         this@ChronosAPI.sessionLeftoverTimeNotificationsExecutors[session.id] = Executors.newSingleThreadScheduledExecutor().also { executor ->
             this.leftoverNotificationThresholds.forEach {
                 val secondsTilNotification = Duration.between(Instant.now(), estimatedExpirationTime.minus(it.measurand, it.unit.toChronoUnit())).seconds
                 if (secondsTilNotification < 0) return@forEach
+
                 executor.schedule({
                     SessionLeftoverTimeThresholdReachedEvent(
                         user = requireNotNull(this@ChronosAPI.getUserFromID(session.id)),
@@ -126,6 +135,7 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         )
     }
 
+    // TODO: Convert to update()
     // TODO: Fire an event -> SessionTimeReplenishEvent
     fun replenish() = with(this.loadConfig()) {
         val maxHistoryLength = this.maxTimeSlotHistory
@@ -260,7 +270,11 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         if (this.arePermissionsGranted(contractor, *permissions).not()) {
             return UpdateResult(code = 40)
         }
-        return UpdateResult(logic())
+        return try {
+            UpdateResult(logic())
+        } catch (exception: Exception) {
+            UpdateResult(code = UpdateResultCodes.INTERNAL_ERROR.code, error = exception)
+        }
     }
 
     fun stopGlobalTimer(contractor: Contractor) = this.update(contractor, arrayOf("stop_global_timer")) {
@@ -294,25 +308,28 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         this.exclusionTable[id] = flag
     }
 
-    public fun resumeTimerFor(id: String) {
+    public fun resumeTimerFor(contractor: Contractor, id: String) = update(contractor, arrayOf("resume_timer")) {
         this.setExclusionFlag(id, false)
         this.executeSessionStart(id)
     }
 
-    public fun pauseTimerFor(id: String) {
+    public fun pauseTimerFor(contractor: Contractor, id: String) = update(contractor, arrayOf("pause_timer")) {
         this.setExclusionFlag(id, true)
         this.executeSessionStop(id, ActionMode.ACTION)
     }
 
     public fun isExcluded(id: String): Boolean = this.exclusionTable.getOrDefault(id, false)
 
+    /**
+     * @return TRUE: Session was started, FALSE: Session wasn't started
+     */
     @Suppress("MemberVisibilityCanBePrivate")
-    public fun executeSessionStart(id: String, overwriteExclusionFlag: Boolean = false) = with(requireNotNull(getUserFromID(id))) {
+    public fun executeSessionStart(id: String, overwriteExclusionFlag: Boolean = false): Boolean = with(requireNotNull(getUserFromID(id))) {
         // TODO: Check if session already present
 
         // Check if user marked as excluded :: Excluded users cannot start a session unless the overwrite flag is set
         if (this@ChronosAPI.isExcluded(id) && overwriteExclusionFlag.not()) {
-            return@with
+            return@with false
         }
 
         // TODO: Check if still timeslots available
@@ -331,6 +348,8 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
 
         // TODO: Move to bridge
         this@ChronosAPI.apiBus() fire SessionCreatedEvent(this@ChronosAPI.getUserFromID(id)!!, session, availableSessionTimeInSec = timeLeft)
+
+        true
     }
 
     private fun stopTimerFor(id: String) = with(requireNotNull(sessionFutures.remove(id))) {
