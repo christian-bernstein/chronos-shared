@@ -268,12 +268,12 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         logic: () -> T
     ): UpdateResult<T?> {
         if (this.arePermissionsGranted(contractor, *permissions).not()) {
-            return UpdateResult(code = 40)
+            return UpdateResult(code = UpdateResultCodes.LACK_OF_PERMISSION.code, success = false)
         }
         return try {
             UpdateResult(logic())
         } catch (exception: Exception) {
-            UpdateResult(code = UpdateResultCodes.INTERNAL_ERROR.code, error = exception)
+            UpdateResult(code = UpdateResultCodes.INTERNAL_ERROR.code, error = exception, success = false)
         }
     }
 
