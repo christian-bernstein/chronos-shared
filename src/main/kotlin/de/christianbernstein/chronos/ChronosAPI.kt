@@ -27,6 +27,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import kotlin.collections.ArrayList
 import kotlin.collections.HashMap
 import kotlin.io.path.readText
 import kotlin.math.max
@@ -277,12 +278,24 @@ class ChronosAPI(var bridge: ChronosAPIBridge) {
         }
     }
 
-    fun stopGlobalTimer(contractor: Contractor) = this.update(contractor, arrayOf("stop_global_timer")) {
+    /**
+     *
+     * TODO: Update TAT implementation -> Handle exceptions
+     */
+    fun stopGlobalTimer(contractor: Contractor): UpdateResult<GlobalTimerStopResult?> = this.update(contractor, arrayOf("stop_global_timer")) {
         this.isGlobalTimerActive = false
+        val exceptions: MutableMap<String, Exception> = HashMap()
         this.sessions.forEach { session ->
             val id = session.key
-            this.executeSessionStop(id, ActionMode.ACTION)
+            try {
+                this.executeSessionStop(id, ActionMode.ACTION)
+            } catch (exception: Exception) {
+                exceptions += id to exception
+            }
         }
+        return@update GlobalTimerStopResult(
+            exceptions = exceptions
+        )
     }
 
     fun startGlobalTimer(contractor: Contractor) = this.update(contractor, arrayOf("start_global_timer")) {
